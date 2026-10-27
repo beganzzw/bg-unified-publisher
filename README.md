@@ -1,239 +1,98 @@
 # bg-unified-publisher
 
-统一微信公众号与小红书图文发布的 MCP 服务。使用 Python MCP SDK，通过 stdio 向 AI 客户端提供内容技术检查、发布、公众号草稿更新和状态查询。
+独立双平台 stdio MCP：公众号使用原生 httpx 官方 API；小红书使用本项目管理的固定版本 Go 引擎，通过 REST 调用。不需要两个已有 MCP 连接器，不读取全局 mcp.json，不需要 --config。
 
-> 当前为 MVP。复用已有公众号和小红书 MCP 服务，不内置平台登录。已通过 23 项离线测试，尚未完成本服务真实端到端发布验收。技术校验不等于平台合规审核。
+这是“内置管理引擎”，不是纯 Python 重写，也没有融合上游 Go 源码。小红书引擎本身仍包含 /mcp 路由，但本项目从不调用它。引擎只绑定 127.0.0.1 随机端口并启用每实例随机 Bearer 鉴权。
 
-## 能做什么
+## 能力
 
 | 功能 | 微信公众号 | 小红书 |
 | --- | --- | --- |
-| 内容技术检查 | 标题、HTML、图片地址 | 标题、正文、标签、图片 |
-| 创建草稿 | 支持 | 不支持 |
-| 公开发布 | 提交已有草稿，受账号权限限制 | 提交图文笔记 |
-| 更新内容 | 仅更新已有草稿 | 不支持 |
-| 查询远端状态 | 支持草稿存在性及发布状态 | 暂不支持 |
+| 登录 | WECHAT_OA_APPID / WECHAT_OA_SECRET 获取 token | 内置登录状态、二维码 |
+| 图文 | 永久封面上传、本地正文图上传及 HTML src 替换 | 本地/远程图片公开提交 |
+| 草稿 | draft/add、get、update | 不支持 |
+| 公开提交 | freepublish/submit，仅接受已有 draft_media_id | REST /api/v1/publish |
+| 状态 | freepublish/get 或草稿存在性 | 仅本地提交记录，不支持发布后读回 |
 
-提供五个 MCP 工具：
+公众号 token 仅在内存缓存，不返回、不写库、不输出原始异常。封面三选一：`image_path`（绝对 PNG/JPEG 文件）、`thumb_media_id`（已有永久素材）、`image_url`（兼容旧调用，下载要求 HTTPS 公网地址，建议使用本地图片）。正文 img src 支持带引号的本机绝对 PNG/JPEG 路径或已有 mmbiz.qpic.cn 地址；相同本地正文图单次操作只上传一次。更新草稿同样支持图片上传。图片限制 10MB，并检查 PNG/JPEG 文件头；实际平台限制仍可能更严格。
 
-- `prepare_content`：组装已写好的平台文案并校验，不自动改写。
-- `check_content`：检查单个平台的内容格式。
-- `publish_content`：执行草稿创建或公开发布。
-- `update_content`：更新公众号草稿。
-- `get_publish_status`：查看本地操作记录，可选查询公众号远端状态。
+## 独立环境安装
 
-## MCP 接口规范
-
-- [协议与接口规范](MCP_SPEC.md)：传输、参数、返回值、错误状态、幂等语义及验证边界。
-- [机器可读工具 Schema](mcp-tools.schema.json)：从实际 FastMCP 注册的五个工具导出。
-
-当前固定 SDK 声明支持的最高协议版本为 `2025-11-25`，实际版本通过初始化协商；不宣称兼容最新版全部协议能力。
-
-## 安装
-
-建议 Python 3.11 或更新版本。
+Python 3.11+，在项目目录执行：
 
 ```bash
-git clone https://github.com/beganzzw/bg-unified-publisher.git
-cd bg-unified-publisher
 python -m venv .venv
+# Windows 使用 .venv/Scripts/python.exe；macOS/Linux 使用 .venv/bin/python
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+.venv/Scripts/python.exe engine.py install
 ```
 
-Windows：
+`engine.py install` 是显式网络下载命令：仅安装 release.json 固定的 v2.5.5 官方引擎，校验发行资产 SHA256，使用临时目录、原子落盘，不执行引擎。支持 Windows amd64、Linux amd64、macOS arm64。不支持的平台不会猜测下载地址。也可以不安装，向 server.py 传 `--xhs-binary <现有官方binary绝对路径>`，同样必须通过固定版本哈希校验。安装目标默认 `.engines/v2.5.5/`，可用 `--directory` 指定，然后配合 `--xhs-binary` 使用。
 
-```powershell
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+### 浏览器必须单独准备
+
+v2.5.5 上游只使用其固定 Chromium 派生浏览器 `148.0.7778.215`，不支持用普通系统 Chrome 替代。上游源码在缺少缓存时会自动下载；本管理器启动前强制检查缓存，缺失即拒绝，运行时不会替用户执行这一下载。
+
+管理员需显式从 release.json 的 browser_source 对应版本目录取得本平台归档及 SHA256SUMS，先核对摘要、保留浏览器原始许可证，再解压到以下独立目录（`<runtime>` 对应 --runtime-dir）：
+
+| 系统 | 上游归档名 | 解压根目录 | 目录内必须存在 |
+| --- | --- | --- | --- |
+| Windows amd64 | windows-x64.zip | `<runtime>/cache/xiaohongshu-mcp/browser/148.0.7778.215/` | chrome.exe |
+| Linux amd64 | linux-x64.tar.xz | `<runtime>/cache/xiaohongshu-mcp/browser/148.0.7778.215/` | chrome |
+| macOS arm64 | macos-arm64.dmg | `<runtime>/home/Library/Caches/xiaohongshu-mcp/browser/148.0.7778.215/` | Chromium |
+
+Linux/macOS 应保留浏览器执行权限及依赖文件；Linux 还需要浏览器系统库。浏览器由管理员预先安装，本项目不代替上游维护其供应链或分发许可证。运行期间不要删除缓存。cookie 写入 `<runtime>/cookies/cookies.json`，HOME、缓存和临时目录也独立。运行目录属于本地账号，应限制其他账号访问；Windows ACL 由部署者配置。
+
+## 接入客户端
+
+参考 [config.example.json](config.example.json)，替换占位路径，并在客户端安全环境配置中设置 `WECHAT_OA_APPID`、`WECHAT_OA_SECRET`。示例不包含真实凭据。小红书不需公众号凭据；凭据不会传给子进程。
+
+```text
+command: <项目虚拟环境Python绝对路径>
+args: [<项目/server.py绝对路径>, --db, <本地数据库绝对路径>, --runtime-dir, <独立运行目录绝对路径>]
+可选追加: [--xhs-binary, <固定官方binary绝对路径>]
 ```
 
-macOS / Linux：
+没有 --config 参数。数据库的父目录需预先存在。只用公众号时无需安装小红书引擎；引擎在首次小红书调用时惰性启动。客户端关闭 stdio、正常退出、SIGTERM 时清理本实例启动的引擎；不会连接、接管或终止用户已有的 18060 服务。运行目录有独占锁，不同实例不得共享 cookie 目录。异常断电/强制杀死父进程可能留下锁或引擎，需人工核实归属后处理，程序不会按 PID 文件杀未知进程。清理通过自有进程句柄完成，不按名字全局结束浏览器。
 
-```bash
-.venv/bin/python -m pip install -r requirements.txt
-```
+## 调用
 
-## 上游连接要求
+七个工具及完整参数见 [MCP_SPEC.md](MCP_SPEC.md)，可机器读取 [mcp-tools.schema.json](mcp-tools.schema.json)。
 
-运行时通过 `--config` 读取本机 JSON 配置中的 `mcpServers`，需要存在以下两个键：
+先调用 `xiaohongshu_login_qrcode`（参数 `{}`），展示返回的 `img`，扫码后调用 `xiaohongshu_login_status`。二维码是临时登录材料，仅交给当前用户，不应公开分享。
 
-- `wechat_oa_api_mcp`
-- `xiaohongshu-mcp`
-
-请复用已经配置并验证可用的服务条目。支持 `stdio`、`http`、`streamable-http` 和 `sse`；HTTP 连接必须显式设置 `type`，未指定时按 stdio 处理。
-
-公众号上游需提供 `get_access_token`、`create_wechat_draft`、`publish_wechat_draft`，接收 `{"args":"JSON字符串"}`；获取令牌及业务结果须使用当前适配器支持的 JSON 字段。小红书上游需提供 `publish_content`，接收标题、正文、图片及标签。每次调用前动态发现能力并校验上游参数。
-
-这不是任意同名服务的通用兼容层。接入其他实现时，应核对 `adapters.py` 的参数和响应约定。小红书登录由上游服务维护；微信公众号的 AppID、AppSecret 由上游配置和包装器管理。
-
-## 接入 MCP 客户端
-
-将以下条目合并到客户端配置的 `mcpServers` 中，保留两个原有上游条目。将示例路径替换为本机绝对路径：
-
-```json
-{
-  "mcpServers": {
-    "bg-unified-publisher": {
-      "command": "C:/path/to/bg-unified-publisher/.venv/Scripts/python.exe",
-      "args": [
-        "C:/path/to/bg-unified-publisher/server.py",
-        "--config",
-        "C:/path/to/mcp.json",
-        "--db",
-        "C:/path/to/bg-unified-publisher/operations.sqlite3"
-      ]
-    }
-  }
-}
-```
-
-macOS / Linux 将 `command` 改为项目 `.venv/bin/python` 的绝对路径。
-
-在 WorkBuddy 中添加配置后，到连接器管理页的自定义连接器入口信任并启用服务。配置文件应保留在本机，禁止提交含凭据的配置到仓库。
-
-## 调用示例
-
-以下均为 MCP 工具的 JSON 参数。示例 ID、URL 和文件路径需要替换为真实值。
-
-### 检查小红书文案
-
-调用 `check_content`：
-
-```json
-{
-  "platform": "xiaohongshu",
-  "action": "public",
-  "content": {
-    "title": "这次模型更新值得关注吗",
-    "content": "这里填写已经核对的正文。",
-    "images": ["C:/images/cover.jpg"],
-    "tags": ["人工智能", "科技观察"]
-  }
-}
-```
-
-本版本保守限制：标题最多 20 个字符；正文与标签合计最多 1000 个字符；图片 1–9 张。图片可使用 HTTP(S) 地址，或服务器所在机器上存在的绝对路径（PNG、JPG、JPEG、WebP）。远程部署时，客户端本地路径不能直接作为服务器路径使用。
-
-### 发布小红书图文
-
-调用 `publish_content`：
-
-```json
-{
-  "action": "public",
-  "idempotency_key": "article-001-xhs-v1",
-  "contents": {
-    "xiaohongshu": {
-      "title": "这次模型更新值得关注吗",
-      "content": "这里填写已确认发布的正文。",
-      "images": ["C:/images/cover.jpg"],
-      "tags": ["人工智能"]
-    }
-  }
-}
-```
-
-此调用会公开提交。当前不支持定时发布、带货商品、原创声明开关或平台 AI 声明控件；使用前应在内容审核和平台操作中处理需要的声明。上游成功回执只记为 `submitted`，不视为已审核公开。
-
-### 创建公众号草稿
-
-调用 `publish_content`：
+混合公众号草稿与小红书公开提交：
 
 ```json
 {
   "action": "draft",
-  "idempotency_key": "article-001-wechat-draft-v1",
+  "platform_actions": {"xiaohongshu": "public"},
+  "idempotency_key": "article-001-v1",
   "contents": {
-    "wechat": {
-      "title": "这次模型更新值得关注吗",
-      "content": "<section><p><span leaf=\"\">这里是正文。</span></p></section>",
-      "image_url": "https://example.com/cover.jpg",
-      "author": "作者名",
-      "digest": "文章摘要"
-    }
+    "wechat": {"title": "文章标题", "content": "<p>正文</p>", "thumb_media_id": "EXISTING_PERMANENT_MEDIA_ID"},
+    "xiaohongshu": {"title": "笔记标题", "content": "正文", "images": ["C:/example/images/cover.jpg"]}
   }
 }
 ```
 
-封面 `image_url` 必须为可供上游读取的真实 HTTP(S) 地址。正文中的图片须先通过微信上传接口获得 `mmbiz.qpic.cn` 地址。本版没有整合公众号本地图片自动上传。
+`platform_actions` 可选，每个平台优先采用自己的 action，未指定则用原有 action。旧版单平台调用保持兼容。公众号 public 内容只接受 `{"draft_media_id":"EXISTING_DRAFT_ID"}`，应先审核草稿。更新使用 `update_content`，传完整文章、media_id、index、action=draft 和新 idempotency_key。
 
-### 更新公众号草稿
+`get_publish_status` 默认只查本地；`verify_remote=true` 才查公众号草稿存在性或发布状态。小红书只报告本地回执：即便引擎返回“发布完成”，也只记 `submitted`，不声称公开可见或审核成功。
 
-调用 `update_content`，传入完整的目标文章字段，不要把它当作只提交差异的补丁：
+同一平台和 key 只执行一次；参数改变返回 conflict；超时、中断及无法识别的响应保存 unknown，不自动重试。双平台不是原子事务，可返回 partial_success；不自动回滚。不同 key 不保证去重，遇到 unknown 应先人工核对。数据库只保存指纹和精简结果，不保存正文、cookie、token。
 
-```json
-{
-  "platform": "wechat",
-  "action": "draft",
-  "media_id": "EXISTING_DRAFT_MEDIA_ID",
-  "index": 0,
-  "idempotency_key": "article-001-wechat-update-v2",
-  "content": {
-    "title": "更新后的标题",
-    "content": "<section><p><span leaf=\"\">更新后的正文。</span></p></section>",
-    "thumb_media_id": "EXISTING_PERMANENT_THUMB_MEDIA_ID"
-  }
-}
-```
-
-封面需要已有永久素材 ID。仅支持草稿，不支持修改已发表文章。
-
-### 提交公众号草稿公开发布
-
-调用 `publish_content`：
-
-```json
-{
-  "action": "public",
-  "idempotency_key": "article-001-wechat-public-v1",
-  "contents": {
-    "wechat": {
-      "draft_media_id": "EXISTING_DRAFT_MEDIA_ID"
-    }
-  }
-}
-```
-
-需要公众号拥有相应发布权限。统一服务不能绕过微信 `48001` 等账号权限限制。
-
-### 查询状态
-
-调用 `get_publish_status`：
-
-```json
-{
-  "platform": "wechat",
-  "idempotency_key": "article-001-wechat-public-v1",
-  "verify_remote": true
-}
-```
-
-默认只查询本地记录。公众号远端查询可确认草稿存在或获取发布状态，草稿存在不代表正文逐字核验。小红书暂时只支持本地提交记录，需另外查看平台最终展示状态。
-
-## 双平台操作与防重复
-
-`contents` 可同时包含 `wechat` 和 `xiaohongshu`，但 `action` 为整次调用共用。因此“公众号存草稿 + 小红书公开发布”需要两次调用；结果按平台分别返回，不提供跨平台原子事务或自动回滚。
-
-每次新的写操作使用唯一 `idempotency_key`。同一平台和 key 的请求只执行一次：重复相同参数返回保存的结果，参数不同则返回冲突。记录通过 SQLite 持久化。
-
-失败、超时或响应无法识别时，不自动重试。遇到 `unknown`，先到平台核对，不能简单换 key 重发。不同 key 不会自动识别同一篇内容，也不承诺账号全局去重。
-
-本地数据库仅记录请求指纹和精简结果，不存文章正文或访问令牌。它不是文章素材库；请自行备份原稿及平台 ID。
-
-## 测试
+## 测试和边界
 
 ```bash
-python -m unittest discover -s . -p "test_*.py"
+.venv/Scripts/python.exe -m unittest discover -s . -p "test_*.py" -v
 ```
 
-23 项离线测试覆盖参数检查、重复调用、未知结果、部分成功、适配器与敏感异常处理。测试使用替身，不触发真实发布。当前环境在导入 SDK 时可能出现 Pydantic 前向引用警告，测试仍通过；生产使用前请完成连接握手和受控验收。
+44 项离线测试通过。原有业务测试保留并适配；上游 MCP 测试替换为原生 HTTP/REST、图片替换、token 安全、固定安装哈希和临时目录清理、生命周期归属、混合 action、部分成功及防重复测试。网络使用 MockTransport，进程使用 mock，测试数据只在 TemporaryDirectory。未实际安装/执行上游引擎或浏览器，未登录真实账号、未真实发布、未完成真实端到端验收。SDK 可能输出 Pydantic 前向引用警告，不影响当前测试。
 
-## 安全与限制
+仅支持图文；不支持小红书更新、定时、商品、平台声明控件或发布后读回。微信权限/IP 白名单和平台审核仍由账号及平台决定。HTML 检查只是格式检查。服务面向可信本地客户端，图片路径及远程 URL 应来自可信用户。
 
-- 不提交 `mcp.json`、`.env`、令牌、发布数据库或虚拟环境。
-- 运行时读取上游凭据，原始响应只在内存处理，错误返回不暴露原始异常。
-- 仅做基础格式检查，不检查事实真实性、素材授权，也不保证平台审核通过。
-- 本地图片路径和远端图片 URL 应来自可信输入；不要将服务直接暴露给不可信客户端。
-- 发布权限、账号登录和审核结果由各平台决定。
+## 上游核查与授权
 
-## 许可证
+固定来源：[xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)，v2.5.5。核查 README、routes.go、handlers_api.go、service.go、main.go、app_server.go、middleware.go、cookies/cookies.go、browser/browser_download.go 和 browser_version.txt；来源与资产摘要存于 third_party/xiaohongshu-mcp/release.json。
 
-[MIT](LICENSE) · Copyright (c) 2026 beganzzw
+本项目原创代码保持根目录 MIT。上游引擎为 Apache-2.0，原始 LICENSE 和本项目归属 NOTICE 位于 third_party/xiaohongshu-mcp。浏览器及其依赖适用各自授权，不冒用本项目 MIT，也不将可能存在的其他许可证改标为 MIT。

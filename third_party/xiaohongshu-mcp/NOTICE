@@ -1,0 +1,7 @@
+本项目通过 REST 管理独立的 xpzouying/xiaohongshu-mcp v2.5.5 发行版进程。
+上游：https://github.com/xpzouying/xiaohongshu-mcp
+上游许可证：Apache License 2.0，原文见本目录 LICENSE。
+上游固定源码树未含 NOTICE 文件；本文件是本项目的第三方归属说明，不是上游 NOTICE。
+未融合、改写或重新授权上游 Go 源码；引擎由用户显式安装，不包含在本项目源码内。
+根目录许可证仅覆盖本项目原创代码，不覆盖引擎、浏览器或其依赖。
+浏览器为上游单独分发的 Chromium 派生构建，其授权及第三方通知应随浏览器原始分发保留，不能视为本项目 MIT 或 Apache 授权。

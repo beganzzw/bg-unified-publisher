@@ -31,6 +31,13 @@ def web_url(value):
         return False
 
 
+def local_image(value):
+    try:
+        return isinstance(value, str) and Path(value).is_absolute() and Path(value).is_file() and Path(value).suffix.lower() in {'.png', '.jpg', '.jpeg'}
+    except (OSError, ValueError):
+        return False
+
+
 class HTMLCheck(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -45,8 +52,10 @@ class HTMLCheck(HTMLParser):
                 self.errors.append('HTML 含活动属性')
         if tag == 'img':
             src = dict(attrs).get('src', '')
-            if not web_url(src) or urlsplit(src).hostname != 'mmbiz.qpic.cn':
-                self.errors.append('正文图片必须使用微信上传接口返回的 mmbiz.qpic.cn 地址')
+            if not local_image(src) and (not web_url(src) or urlsplit(src).hostname != 'mmbiz.qpic.cn'):
+                self.errors.append('正文图片需本机绝对 PNG/JPEG 路径或微信 mmbiz.qpic.cn 地址')
+            if local_image(src) and not re.search(r'\bsrc\s*=\s*[\"\']', self.get_starttag_text(), re.I):
+                self.errors.append('本地图片 src 必须加引号')
         if tag not in {'img', 'br', 'hr', 'input', 'meta', 'link', 'source', 'wbr', 'area', 'base', 'col', 'embed', 'param', 'track'}:
             self.stack.append(tag)
 
@@ -75,7 +84,7 @@ def check_content(platform, content, action='draft', operation='publish'):
         if set(content) != {'draft_media_id'} or not isinstance(content.get('draft_media_id'), str) or not content['draft_media_id'].strip():
             errors.append('公众号 public 只接受已有 draft_media_id；先单独创建并审核草稿')
         return {'valid': not errors, 'errors': errors, 'warnings': warnings}
-    allowed = {'title', 'content', 'images', 'tags'} if platform == 'xiaohongshu' else {'title', 'content', 'image_url', 'author', 'digest', 'source_url', 'need_open_comment', 'thumb_media_id'}
+    allowed = {'title', 'content', 'images', 'tags'} if platform == 'xiaohongshu' else {'title', 'content', 'image_url', 'image_path', 'author', 'digest', 'source_url', 'need_open_comment', 'thumb_media_id'}
     if set(content) - allowed:
         errors.append('包含不支持字段')
     title, body = content.get('title'), content.get('content')
@@ -105,10 +114,15 @@ def check_content(platform, content, action='draft', operation='publish'):
             errors.append('正文加标签超过本 MVP 1000 字符限制')
         warnings.append('图片只检查地址和数量，不下载、不验证 MIME 或尺寸；标题保守按字符计数')
     elif platform == 'wechat':
-        if operation == 'publish' and not web_url(content.get('image_url')):
-            errors.append('创建草稿需要 image_url 封面地址')
-        if operation == 'update' and ('image_url' in content or not isinstance(content.get('thumb_media_id'), str) or not content['thumb_media_id'].strip()):
-            errors.append('更新草稿需已有永久 thumb_media_id，不支持 image_url 自动上传')
+        covers = [k for k in ('image_path', 'image_url', 'thumb_media_id') if k in content]
+        if len(covers) != 1:
+            errors.append('需且仅需一种封面：image_path、image_url 或 thumb_media_id')
+        if 'image_path' in content and not local_image(content['image_path']):
+            errors.append('image_path 需存在的绝对 PNG/JPEG 路径')
+        if 'image_url' in content and not web_url(content['image_url']):
+            errors.append('image_url 格式无效')
+        if 'thumb_media_id' in content and (not isinstance(content['thumb_media_id'], str) or not content['thumb_media_id'].strip()):
+            errors.append('thumb_media_id 不可为空')
         for field in ('author', 'digest', 'source_url', 'thumb_media_id'):
             if field in content and not isinstance(content[field], str):
                 errors.append('可选文本字段类型错误')
@@ -188,12 +202,15 @@ class Publisher:
         self.store.save(scoped, result)
         return result
 
-    async def publish_content(self, contents, action, idempotency_key):
+    async def publish_content(self, contents, action, idempotency_key, platform_actions=None):
         if not isinstance(contents, dict) or not contents:
             return {'state': 'validation_failed'}
+        if platform_actions is not None and (not isinstance(platform_actions, dict) or set(platform_actions) - set(contents) or any(a not in ('draft', 'public') for a in platform_actions.values())):
+            return {'state': 'validation_failed', 'reason': 'invalid_platform_actions'}
         results = {}
         for platform, content in contents.items():
-            results[platform] = await self.execute(platform, content, action, idempotency_key)
+            selected_action = (platform_actions or {}).get(platform, action)
+            results[platform] = await self.execute(platform, content, selected_action, idempotency_key)
         states = [r['state'] for r in results.values()]
         good = sum(s in {'submitted', 'draft_created', 'updated'} for s in states)
         return {'state': 'success' if good == len(states) else 'partial_success' if good else 'not_completed', 'platforms': results}

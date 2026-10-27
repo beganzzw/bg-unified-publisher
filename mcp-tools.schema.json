@@ -22,6 +22,21 @@
           "action": {
             "title": "Action",
             "type": "string"
+          },
+          "platform_actions": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Platform Actions"
           }
         },
         "required": [
@@ -82,6 +97,21 @@
           "idempotency_key": {
             "title": "Idempotency Key",
             "type": "string"
+          },
+          "platform_actions": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Platform Actions"
           }
         },
         "required": [
@@ -160,6 +190,24 @@
           "idempotency_key"
         ],
         "title": "get_publish_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "xiaohongshu_login_status",
+      "description": "通过内置引擎检查登录状态；缺失引擎或浏览器时不自动下载。",
+      "inputSchema": {
+        "properties": {},
+        "title": "xiaohongshu_login_statusArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "xiaohongshu_login_qrcode",
+      "description": "获取登录二维码；仅向当前调用者返回，不落库，不记录 cookie。",
+      "inputSchema": {
+        "properties": {},
+        "title": "xiaohongshu_login_qrcodeArguments",
         "type": "object"
       }
     }

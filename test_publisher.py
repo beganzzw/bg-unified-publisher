@@ -13,7 +13,7 @@ from unittest.mock import patch
 import httpx
 from mcp.types import CallToolResult, TextContent
 
-from adapters import MCPBridge, Secrets, Wechat, Xiaohongshu, silence_logs
+from adapters import Secrets, Wechat, Xiaohongshu, silence_logs
 from core import Publisher, Rejected, SafeError, Store, check_content
 from server import build_server
 
@@ -156,77 +156,25 @@ class OfflineTests(unittest.IsolatedAsyncioTestCase):
     async def test_fastmcp_registration_without_server(self):
         app = build_server(self.p)
         tools = await app.list_tools()
-        self.assertEqual({x.name for x in tools}, {'prepare_content', 'check_content', 'publish_content', 'update_content', 'get_publish_status'})
+        self.assertEqual({x.name for x in tools}, {'prepare_content', 'check_content', 'publish_content', 'update_content', 'get_publish_status', 'xiaohongshu_login_status', 'xiaohongshu_login_qrcode'})
         self.assertIn('action', next(x for x in tools if x.name == 'publish_content').inputSchema['required'])
         self.assertFalse(self.db.exists())
 
-    async def test_discovery_before_call_and_pagination(self):
-        events = []
-        class Session:
-            async def list_tools(self, cursor=None):
-                events.append(('list', cursor))
-                if cursor is None:
-                    return NS(tools=[], nextCursor='page2')
-                return NS(tools=[NS(name='publish_content', inputSchema={'type': 'object', 'required': ['title']})], nextCursor=None)
-            async def call_tool(self, name, arguments):
-                events.append(('call', name))
-                return CallToolResult(content=[TextContent(type='text', text='{"ok":true}')])
-        bridge = MCPBridge({}, Secrets())
-        @asynccontextmanager
-        async def session():
-            yield Session()
-        bridge.session = session
-        await bridge.call('publish_content', {'title': '标题'})
-        self.assertEqual(events, [('list', None), ('list', 'page2'), ('call', 'publish_content')])
-        events.clear()
-        with self.assertRaises(Rejected):
-            await bridge.call('nonexistent', {})
-        self.assertFalse(any(x[0] == 'call' for x in events))
-        with self.assertRaises(Rejected):
-            await bridge.call('publish_content', {})
+    async def test_mixed_actions_and_duplicate(self):
+        result = await self.p.publish_content({'wechat': WX, 'xiaohongshu': XHS}, 'draft', 'mixed', {'xiaohongshu': 'public'})
+        self.assertEqual(result['state'], 'success')
+        await self.p.publish_content({'wechat': WX, 'xiaohongshu': XHS}, 'draft', 'mixed', {'xiaohongshu': 'public'})
+        self.assertEqual((self.a.calls, self.b.calls), (1, 1))
 
-    async def test_wechat_contract_and_token_not_returned(self):
-        secrets = Secrets()
-        bridge = FakeBridge([{'success': True, 'access_token': SECRET}, {'success': True, 'draft_media_id': 'draft123'}])
-        adapter = Wechat(bridge, secrets)
-        result = await adapter.publish(WX, 'draft')
-        self.assertEqual(result, {'state': 'draft_created', 'media_id': 'draft123'})
-        self.assertEqual(json.loads(bridge.calls[1][1]['args'])['access_token'], SECRET)
-        self.assertNotIn(SECRET, json.dumps(result))
-        with self.assertRaises(SafeError):
-            secrets.safe_id(SECRET)
+    async def test_mixed_partial_success(self):
+        self.b.error = TimeoutError()
+        result = await self.p.publish_content({'wechat': WX, 'xiaohongshu': XHS}, 'draft', 'mixed', {'xiaohongshu': 'public'})
+        self.assertEqual(result['state'], 'partial_success')
 
-    async def test_wechat_unknown_wrapper_failure(self):
-        bridge = FakeBridge([{'success': True, 'access_token': SECRET}, {'success': False, 'errcode': None, 'error_msg': SECRET}])
-        with self.assertRaises(SafeError):
-            await Wechat(bridge, Secrets()).publish({'draft_media_id': 'd'}, 'public')
-
-    async def test_official_update_and_status_mock_http(self):
-        requests = []
-        def handler(request):
-            requests.append(request)
-            if request.url.path.endswith('/update'):
-                return httpx.Response(200, json={'errcode': 0})
-            if request.url.path.endswith('/freepublish/get'):
-                return httpx.Response(200, json={'publish_status': 0})
-            return httpx.Response(200, json={'news_item': [{'title': '标题'}]})
-        def factory(**kwargs):
-            return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
-        bridge = FakeBridge([{'success': True, 'access_token': SECRET}] * 3)
-        adapter = Wechat(bridge, Secrets(), factory)
-        result = await adapter.update({'title': '标题', 'content': '<p>正文</p>', 'thumb_media_id': 'thumb'}, 'media', 0)
-        self.assertEqual(result['state'], 'updated')
-        payload = json.loads(requests[0].content)
-        self.assertEqual(payload['media_id'], 'media')
-        self.assertIsInstance(payload['articles'], dict)
-        self.assertEqual((await adapter.status({'publish_id': 'pub'}))['state'], 'published')
-        self.assertEqual((await adapter.status({'media_id': 'media'}))['state'], 'draft_exists')
-
-    async def test_xhs_does_not_claim_publication(self):
-        adapter = Xiaohongshu(FakeBridge([{'message': SECRET, 'success': True}]))
-        result = await adapter.publish(XHS, 'public')
-        self.assertEqual(result['state'], 'unknown')
-        self.assertNotIn(SECRET, json.dumps(result))
+    async def test_bad_platform_actions(self):
+        result = await self.p.publish_content({'wechat': WX}, 'draft', 'bad', {'other': 'public'})
+        self.assertEqual(result['state'], 'validation_failed')
+        self.assertFalse(self.db.exists())
 
     async def test_cancelled_write_stays_reserved(self):
         self.a.error = asyncio.CancelledError()

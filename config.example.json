@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "bg-unified-publisher": {
+      "command": "<ABSOLUTE_PROJECT_VENV_PYTHON>",
+      "args": [
+        "<ABSOLUTE_PROJECT_DIR>/server.py",
+        "--db", "<EXISTING_PRIVATE_DIRECTORY>/operations.sqlite3",
+        "--runtime-dir", "<PRIVATE_RUNTIME_DIRECTORY>"
+      ],
+      "env": {
+        "WECHAT_OA_APPID": "<SET_VIA_CLIENT_SECRET_CONFIGURATION>",
+        "WECHAT_OA_SECRET": "<SET_VIA_CLIENT_SECRET_CONFIGURATION>"
+      }
+    }
+  }
+}

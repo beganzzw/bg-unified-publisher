@@ -1,25 +1,20 @@
-"""运行时连接既有 MCP；所有上游原始响应仅在内存处理。"""
+"""原生微信 HTTP API 与内置小红书引擎 REST 适配器。"""
 import asyncio
-import json
+import html
 import logging
 import os
 import re
-from contextlib import asynccontextmanager
-from datetime import timedelta
+import time
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
-from jsonschema import validate
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamable_http_client
-from mcp.client.sse import sse_client
 
-from core import Rejected, SafeError
+from core import Rejected, SafeError, local_image
 
 
 def silence_logs():
-    # HTTP 调试日志可能携带 query token，禁用整个服务的 Python 日志。
     logging.disable(logging.CRITICAL)
 
 
@@ -39,146 +34,143 @@ class Secrets:
         return value
 
 
-def load_config(path, secrets):
-    config = json.loads(Path(path).read_text(encoding='utf-8-sig'))['mcpServers']
-    selected = {}
-    for name in ('wechat_oa_api_mcp', 'xiaohongshu-mcp'):
-        item = config[name]
-        for value in (item.get('env') or {}).values():
-            secrets.add(value)
-        for value in (item.get('headers') or {}).values():
-            secrets.add(value)
-        selected[name] = item
-    return selected
+class ImageSources(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.sources = []
 
-
-class MCPBridge:
-    def __init__(self, config, secrets):
-        self.config, self.secrets = config, secrets
-
-    @asynccontextmanager
-    async def session(self):
-        c = self.config
-        kind = c.get('type', 'stdio')
-        if kind == 'stdio':
-            args = c.get('args', [])
-            if '--debug' in args:
-                raise Rejected('upstream_debug_not_allowed')
-            env = {**os.environ, **(c.get('env') or {})}
-            params = StdioServerParameters(command=c['command'], args=args, env=env)
-            with open(os.devnull, 'w') as sink:
-                async with stdio_client(params, errlog=sink) as (read, write):
-                    async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=120)) as session:
-                        await session.initialize()
-                        yield session
-        elif kind in ('http', 'streamable-http'):
-            async with httpx.AsyncClient(headers=c.get('headers'), timeout=120, follow_redirects=False) as client:
-                async with streamable_http_client(c['url'], http_client=client) as (read, write, _):
-                    async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=120)) as session:
-                        await session.initialize()
-                        yield session
-        elif kind == 'sse':
-            async with sse_client(c['url'], headers=c.get('headers'), timeout=120) as (read, write):
-                async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=120)) as session:
-                    await session.initialize()
-                    yield session
-        else:
-            raise Rejected('unsupported_transport')
-
-    async def discover(self, session):
-        tools, cursor, seen = {}, None, set()
-        while True:
-            page = await session.list_tools(cursor=cursor)
-            for tool in page.tools:
-                tools[tool.name] = tool.inputSchema
-            cursor = page.nextCursor
-            if cursor is None:
-                return tools
-            if cursor in seen:
-                raise Rejected('invalid_pagination')
-            seen.add(cursor)
-
-    async def call(self, name, arguments):
-        async with asyncio.timeout(150):
-            async with self.session() as session:
-                tools = await self.discover(session)
-                if name not in tools:
-                    raise Rejected('capability_missing')
-                try:
-                    validate(arguments, tools[name])
-                except Exception:
-                    raise Rejected('upstream_schema_mismatch') from None
-                result = await session.call_tool(name, arguments=arguments)
-                if result.isError:
-                    # 工具可能在已经发送请求后才失败，保守记作未知。
-                    raise SafeError('upstream_tool_error')
-                data = getattr(result, 'structuredContent', None)
-                if data is None:
-                    texts = [x.text for x in result.content if x.type == 'text']
-                    if len(texts) != 1:
-                        raise SafeError('unrecognized_response')
-                    try:
-                        data = json.loads(texts[0])
-                    except ValueError:
-                        if name == 'publish_content' and texts[0].startswith('内容发布成功:') and 'Status:发布完成' in texts[0]:
-                            return {'submission_acknowledged': True}
-                        raise SafeError('unrecognized_response') from None
-                if isinstance(data, dict) and set(data) == {'result'}:
-                    data = data['result']
-                if not isinstance(data, dict):
-                    raise SafeError('unrecognized_response')
-                return data
+    def handle_starttag(self, tag, attrs):
+        if tag == 'img':
+            self.sources.extend(v for k, v in attrs if k == 'src' and v)
 
 
 class Wechat:
-    def __init__(self, bridge, secrets, http_factory=httpx.AsyncClient):
-        self.bridge, self.secrets, self.http_factory = bridge, secrets, http_factory
+    BASE = 'https://api.weixin.qq.com/cgi-bin/'
+
+    def __init__(self, secrets=None, http_factory=httpx.AsyncClient, appid=None, secret=None):
+        self.secrets = secrets or Secrets()
+        self.http_factory = http_factory
+        self.appid = appid if appid is not None else os.environ.get('WECHAT_OA_APPID', '')
+        self.secret = secret if secret is not None else os.environ.get('WECHAT_OA_SECRET', '')
+        self.secrets.add(self.secret)
+        self._token, self._expires = None, 0
+        self._lock = asyncio.Lock()
+
+    async def request(self, method, endpoint, **kwargs):
+        try:
+            async with self.http_factory(timeout=60, follow_redirects=False, trust_env=False) as client:
+                response = await client.request(method, self.BASE + endpoint, **kwargs)
+                response.raise_for_status()
+                data = response.json()
+            if not isinstance(data, dict):
+                raise SafeError('invalid_official_response')
+            if data.get('errcode', 0) != 0:
+                raise Rejected('official_api_rejected')
+            return data
+        except (Rejected, SafeError):
+            raise
+        except Exception:
+            raise SafeError('official_transport_or_response_error') from None
 
     async def token(self):
-        data = await self.bridge.call('get_access_token', {'args': '{}'})
-        token = data.get('access_token')
-        if data.get('success') is not True or not isinstance(token, str) or not token:
-            raise Rejected('credential_unavailable')
-        self.secrets.add(token)
-        return token
-
-    def check_result(self, data):
-        if data.get('success') is not True:
-            if type(data.get('errcode')) is int and data['errcode'] != 0:
-                raise Rejected('remote_rejected')
-            raise SafeError('unknown_upstream_result')
-
-    async def publish(self, content, action):
-        token = await self.token()
-        if action == 'draft':
-            data = await self.bridge.call('create_wechat_draft', {'args': json.dumps({**content, 'access_token': token}, ensure_ascii=False)})
-            self.check_result(data)
-            return {'state': 'draft_created', 'media_id': self.secrets.safe_id(data.get('draft_media_id'))}
-        data = await self.bridge.call('publish_wechat_draft', {'args': json.dumps({'draft_media_id': content['draft_media_id'], 'access_token': token})})
-        self.check_result(data)
-        return {'state': 'submitted', 'publish_id': self.secrets.safe_id(data.get('publish_id'))}
+        async with self._lock:
+            if self._token and time.monotonic() < self._expires:
+                return self._token
+            if not self.appid or not self.secret:
+                raise Rejected('wechat_credentials_missing')
+            data = await self.request('GET', 'token', params={'grant_type': 'client_credential', 'appid': self.appid, 'secret': self.secret})
+            token, ttl = data.get('access_token'), data.get('expires_in')
+            if not isinstance(token, str) or not token or type(ttl) is not int or ttl <= 0:
+                raise Rejected('credential_unavailable')
+            self.secrets.add(token)
+            self._token, self._expires = token, time.monotonic() + max(0, ttl - 120)
+            return token
 
     async def official(self, endpoint, payload):
-        token = await self.token()
-        async with self.http_factory(timeout=30, follow_redirects=False) as client:
-            response = await client.post('https://api.weixin.qq.com/cgi-bin/' + endpoint, params={'access_token': token}, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        if not isinstance(data, dict):
-            raise SafeError('invalid_official_response')
-        if data.get('errcode', 0) != 0:
-            raise Rejected('official_api_rejected')
-        return data
+        return await self.request('POST', endpoint, params={'access_token': await self.token()}, json=payload)
 
-    async def update(self, content, media_id, index):
-        safe_media = self.secrets.safe_id(media_id)
+    async def image_bytes(self, source):
+        if local_image(source):
+            data = Path(source).read_bytes()
+        else:
+            # 仅兼容旧封面 URL；不带 token 下载，不跟随重定向。
+            import ipaddress
+            import socket
+            try:
+                u = urlsplit(source)
+                if u.scheme != 'https' or not u.hostname or u.username or u.password or u.port not in (None, 443):
+                    raise ValueError()
+                addresses = await asyncio.get_running_loop().run_in_executor(None, socket.getaddrinfo, u.hostname, 443)
+                if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+                    raise ValueError()
+                async with self.http_factory(timeout=30, follow_redirects=False, trust_env=False) as client:
+                    async with client.stream('GET', source) as response:
+                        response.raise_for_status()
+                        data = b''
+                        async for chunk in response.aiter_bytes():
+                            data += chunk
+                            if len(data) > 10 * 1024 * 1024:
+                                raise ValueError()
+            except Exception:
+                raise Rejected('cover_download_failed_use_local_image') from None
+        if not data or len(data) > 10 * 1024 * 1024:
+            raise Rejected('image_size_invalid')
+        if data.startswith(b'\x89PNG\r\n\x1a\n'):
+            return data, 'image.png', 'image/png'
+        if data.startswith(b'\xff\xd8\xff'):
+            return data, 'image.jpg', 'image/jpeg'
+        raise Rejected('only_png_jpeg_supported')
+
+    async def upload(self, source, cover=False):
+        data, name, mime = await self.image_bytes(source)
+        params = {'access_token': await self.token()}
+        if cover:
+            params['type'] = 'image'
+        result = await self.request('POST', 'material/add_material' if cover else 'media/uploadimg', params=params, files={'media': (name, data, mime)})
+        if cover:
+            return self.secrets.safe_id(result.get('media_id'))
+        url = result.get('url')
+        if not isinstance(url, str) or urlsplit(url).hostname != 'mmbiz.qpic.cn' or urlsplit(url).scheme not in ('http', 'https'):
+            raise SafeError('invalid_image_url')
+        if any(s in url for s in self.secrets.values):
+            raise SafeError('secret_in_image_url')
+        return url
+
+    async def article(self, content):
         article = dict(content)
+        cover = article.pop('image_path', None) or article.pop('image_url', None)
+        if cover:
+            article['thumb_media_id'] = await self.upload(cover, cover=True)
         if 'source_url' in article:
             article['content_source_url'] = article.pop('source_url')
-        data = await self.official('draft/update', {'media_id': safe_media, 'index': index, 'articles': article})
+        parser = ImageSources()
+        parser.feed(article['content'])
+        replacements = {}
+        for src in parser.sources:
+            if local_image(src) and src not in replacements:
+                replacements[src] = await self.upload(src)
+        # 只替换 img 的 src 属性，保留原 HTML 其他内容及格式。
+        def replace_tag(match):
+            def replace_src(attr):
+                value = html.unescape(attr.group(2))
+                return attr.group(1) + html.escape(replacements.get(value, value), quote=True) + attr.group(3)
+            return re.sub(r'((?<![\w:-])src\s*=\s*[\"\'])(.*?)([\"\'])', replace_src, match.group(0), flags=re.I | re.S)
+        article['content'] = re.sub(r'<img\b[^>]*>', replace_tag, article['content'], flags=re.I | re.S)
+        return article
+
+    async def publish(self, content, action):
+        if action == 'draft':
+            data = await self.official('draft/add', {'articles': [await self.article(content)]})
+            return {'state': 'draft_created', 'media_id': self.secrets.safe_id(data.get('media_id'))}
+        data = await self.official('freepublish/submit', {'media_id': self.secrets.safe_id(content['draft_media_id'])})
+        return {'state': 'submitted', 'publish_id': self.secrets.safe_id(data.get('publish_id'))}
+
+    async def update(self, content, media_id, index):
+        media_id = self.secrets.safe_id(media_id)
+        data = await self.official('draft/update', {'media_id': media_id, 'index': index, 'articles': await self.article(content)})
         if data.get('errcode') != 0:
             raise SafeError('unrecognized_update_response')
-        return {'state': 'updated', 'media_id': safe_media}
+        return {'state': 'updated', 'media_id': media_id}
 
     async def status(self, record):
         if record.get('publish_id'):
@@ -197,16 +189,30 @@ class Wechat:
 
 
 class Xiaohongshu:
-    def __init__(self, bridge):
-        self.bridge = bridge
+    def __init__(self, engine):
+        self.engine = engine
 
     async def publish(self, content, action):
         if action != 'public':
             raise Rejected('draft_unsupported')
-        data = await self.bridge.call('publish_content', {**content, 'visibility': '公开可见'})
-        if data.get('submission_acknowledged') is True:
+        data = await self.engine.request('POST', '/api/v1/publish', {**content, 'visibility': '公开可见'})
+        if data.get('status') == '发布完成':
             return {'state': 'submitted', 'reason': 'submission_acknowledged_public_visibility_not_verified'}
-        return {'state': 'unknown', 'reason': 'upstream_returned_but_publication_not_verified'}
+        return {'state': 'unknown', 'reason': 'unrecognized_publish_response'}
+
+    async def login_status(self):
+        data = await self.engine.request('GET', '/api/v1/login/status')
+        if type(data.get('is_logged_in')) is not bool:
+            raise SafeError('invalid_login_response')
+        return {'is_logged_in': data['is_logged_in']}
+
+    async def login_qrcode(self):
+        data = await self.engine.request('GET', '/api/v1/login/qrcode')
+        if type(data.get('is_logged_in')) is not bool:
+            raise SafeError('invalid_qrcode_response')
+        if not data['is_logged_in'] and not re.fullmatch(r'data:image/(?:png|jpeg);base64,[A-Za-z0-9+/=\r\n]+', data.get('img', '')):
+            raise SafeError('invalid_qrcode_image')
+        return {k: data[k] for k in ('is_logged_in', 'img', 'timeout') if k in data}
 
     async def update(self, content, media_id, index):
         raise Rejected('update_unsupported')

@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/xpzouying/xiaohongshu-mcp",
+  "version": "v2.5.5",
+  "license": "Apache-2.0",
+  "browser_version": "148.0.7778.215",
+  "browser_source": "https://cdn.one-world.ai/browsers",
+  "verified_sources": ["README.md", "LICENSE", "routes.go", "handlers_api.go", "service.go", "main.go", "app_server.go", "middleware.go", "cookies/cookies.go", "browser/browser_download.go", "browser/browser_version.txt"],
+  "assets": {
+    "windows-amd64": {"name": "xiaohongshu-mcp-windows-amd64.exe", "url": "https://github.com/xpzouying/xiaohongshu-mcp/releases/download/v2.5.5/xiaohongshu-mcp-windows-amd64.exe", "sha256": "cb55674f90c1649c875be9c4cde3af193b02fc34ffc860c40c8d711e6ca53e27"},
+    "linux-amd64": {"name": "xiaohongshu-mcp-linux-amd64", "url": "https://github.com/xpzouying/xiaohongshu-mcp/releases/download/v2.5.5/xiaohongshu-mcp-linux-amd64", "sha256": "a4e99322156e7a169466e793045dadc3306c0792db3eade603e030cc0c1c2e3a"},
+    "darwin-arm64": {"name": "xiaohongshu-mcp-darwin-arm64", "url": "https://github.com/xpzouying/xiaohongshu-mcp/releases/download/v2.5.5/xiaohongshu-mcp-darwin-arm64", "sha256": "fad3633fda4a8060e66e2941bc8fc5460326c7cb4e58a32485a9e2c9408e95a8"}
+  }
+}
