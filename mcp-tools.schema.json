@@ -1,0 +1,167 @@
+{
+  "server": "bg-unified-publisher",
+  "sdk": "mcp==1.26.0",
+  "sdk_supported_protocol_versions": [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25"
+  ],
+  "transport": "stdio",
+  "tools": [
+    {
+      "name": "prepare_content",
+      "description": "组装用户已写好的平台文案并校验；不进行 AI 自动改写。平台为 wechat/xiaohongshu。",
+      "inputSchema": {
+        "properties": {
+          "contents": {
+            "additionalProperties": true,
+            "title": "Contents",
+            "type": "object"
+          },
+          "action": {
+            "title": "Action",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contents",
+          "action"
+        ],
+        "title": "prepare_contentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "check_content",
+      "description": "长度、图片地址和 HTML 技术检查，不构成内容合规保证。",
+      "inputSchema": {
+        "properties": {
+          "platform": {
+            "title": "Platform",
+            "type": "string"
+          },
+          "content": {
+            "additionalProperties": true,
+            "title": "Content",
+            "type": "object"
+          },
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "operation": {
+            "default": "publish",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "content",
+          "action"
+        ],
+        "title": "check_contentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "publish_content",
+      "description": "显式 draft/public；公众号 public 只收已有 draft_media_id。失败或未知不得自动换 key 重试。",
+      "inputSchema": {
+        "properties": {
+          "contents": {
+            "additionalProperties": true,
+            "title": "Contents",
+            "type": "object"
+          },
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contents",
+          "action",
+          "idempotency_key"
+        ],
+        "title": "publish_contentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_content",
+      "description": "仅更新公众号已有草稿，action 必须为 draft；不支持修改已发布文章或小红书笔记。",
+      "inputSchema": {
+        "properties": {
+          "platform": {
+            "title": "Platform",
+            "type": "string"
+          },
+          "content": {
+            "additionalProperties": true,
+            "title": "Content",
+            "type": "object"
+          },
+          "media_id": {
+            "title": "Media Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "index": {
+            "default": 0,
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "platform",
+          "content",
+          "media_id",
+          "idempotency_key",
+          "action"
+        ],
+        "title": "update_contentArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_publish_status",
+      "description": "默认只查本地提交记录；显式 verify_remote 才查询公众号远端。小红书远端验证不支持。",
+      "inputSchema": {
+        "properties": {
+          "platform": {
+            "title": "Platform",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "verify_remote": {
+            "default": false,
+            "title": "Verify Remote",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "platform",
+          "idempotency_key"
+        ],
+        "title": "get_publish_statusArguments",
+        "type": "object"
+      }
+    }
+  ]
+}
